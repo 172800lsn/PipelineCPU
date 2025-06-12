@@ -1,0 +1,807 @@
+`timescale 1ns / 1ps
+
+module tb_pipeline_cpu;
+    reg clk;
+    reg reset;
+
+    // 实例化 DUT
+    pipeline_cpu uut (
+        .clk(clk),
+        .reset(reset)
+    );
+
+    // 时钟生成：10ns 周期（推荐写法）
+    initial begin
+        clk = 0;
+        forever #5 clk = ~clk;
+    end
+
+    // 初始化复位逻辑
+    initial begin
+        reset = 1;
+        #10;
+        reset = 0;
+
+        // 仿真运行时间
+        #1000;
+        $finish;
+    end
+
+    // 可选：打印仿真状态
+    initial begin
+        $monitor("Time = %t ns, clk = %b, reset = %b", $time, clk, reset);
+    end
+endmodule
+
+module pipeline_cpu(
+    input wire clk,
+    input wire reset
+);
+    // IF阶段
+    wire [31:0] IF_PC;
+    wire [31:0] IF_instruction;
+    wire [31:0] IF_PC_plus4;
+    // ID阶段
+    wire [4:0] ID_rs1_idx, ID_rs2_idx;
+    wire [31:0] ID_EX_pc;
+    wire [31:0] ID_EX_rs1_val, ID_EX_rs2_val;
+    wire [4:0] ID_EX_rs1_idx, ID_EX_rs2_idx, ID_EX_rd_idx;
+    wire [31:0] ID_EX_imm;
+    wire ID_EX_RegWrite, ID_EX_MemRead, ID_EX_MemWrite;
+    wire [1:0] ID_EX_ALUOp;
+    wire ID_EX_ALUSrc, ID_EX_Branch, ID_EX_Jal, ID_EX_Jalr;
+    wire [1:0] ID_EX_ResultSrc;
+    // EX阶段
+    wire [31:0] EX_MEM_alu_result, EX_MEM_store_val;
+    wire [4:0] EX_MEM_rd;
+    wire EX_MEM_RegWrite, EX_MEM_MemRead, EX_MEM_MemWrite;
+    wire [1:0] EX_MEM_ResultSrc;
+    wire [31:0] EX_MEM_link_val;
+    wire EX_PCSrc;
+    wire [31:0] EX_PC_branch;
+    // MEM阶段
+    wire [4:0] MEM_WB_rd;
+    wire MEM_WB_RegWrite;
+    wire [1:0] MEM_WB_ResultSrc;
+    wire [31:0] MEM_WB_alu_result, MEM_WB_mem_data, MEM_WB_link_val;
+    // WB阶段（寄存器堆写入）
+    wire RF_write_en;
+    wire [4:0] RF_write_addr;
+    wire [31:0] RF_write_data;
+    wire [31:0] WB_write_data;
+    // 寄存器堆读输出
+    wire [31:0] RF_read1_data, RF_read2_data;
+    // 冒险单元输出控制信号
+    wire StallF, StallD;
+    wire FlushD, FlushE;
+    wire [1:0] ForwardAE, ForwardBE;
+    // 冲突检测与数据前递控制模块
+    hazard_unit hazard(
+        .PCSrcE(EX_PCSrc),
+        .RegWriteM(EX_MEM_RegWrite),
+        .RegWriteW(MEM_WB_RegWrite),
+        .Rs1D(ID_rs1_idx),
+        .Rs2D(ID_rs2_idx),
+        .Rs1E(ID_EX_rs1_idx),
+        .Rs2E(ID_EX_rs2_idx),
+        .RdE(ID_EX_rd_idx),
+        .RdM(EX_MEM_rd),
+        .RdW(MEM_WB_rd),
+        .MemReadE(ID_EX_MemRead),
+        .StallF(StallF),
+        .StallD(StallD),
+        .FlushD(FlushD),
+        .FlushE(FlushE),
+        .ForwardAE(ForwardAE),
+        .ForwardBE(ForwardBE)
+    );
+    // 指令存储（ROM）
+    instr_mem IMEM(
+        .addr(IF_PC),
+        .instr(IF_instruction)
+    );
+    // IF阶段模块
+    if_stage if_stage_inst(
+        .clk(clk),
+        .reset(reset),
+        .StallF(StallF),
+        .PCSrc(EX_PCSrc),
+        .PC_branch(EX_PC_branch),
+        .PC_out(IF_PC),
+        .PC_plus4(IF_PC_plus4)
+    );
+    // ID阶段模块
+    id_stage id_stage_inst(
+        .clk(clk),
+        .reset(reset),
+        .StallD(StallD),
+        .FlushD(FlushD),
+        .FlushE(FlushE),
+        .instruction_in(IF_instruction),
+        .PC_in(IF_PC),
+        .reg1_data_in(RF_read1_data),
+        .reg2_data_in(RF_read2_data),
+        .rs1_idx_out(ID_rs1_idx),
+        .rs2_idx_out(ID_rs2_idx),
+        .id_ex_pc(ID_EX_pc),
+        .id_ex_rs1_val(ID_EX_rs1_val),
+        .id_ex_rs2_val(ID_EX_rs2_val),
+        .id_ex_rs1_idx(ID_EX_rs1_idx),
+        .id_ex_rs2_idx(ID_EX_rs2_idx),
+        .id_ex_rd_idx(ID_EX_rd_idx),
+        .id_ex_imm(ID_EX_imm),
+        .id_ex_RegWrite(ID_EX_RegWrite),
+        .id_ex_MemRead(ID_EX_MemRead),
+        .id_ex_MemWrite(ID_EX_MemWrite),
+        .id_ex_ALUOp(ID_EX_ALUOp),
+        .id_ex_ALUSrc(ID_EX_ALUSrc),
+        .id_ex_Branch(ID_EX_Branch),
+        .id_ex_Jal(ID_EX_Jal),
+        .id_ex_Jalr(ID_EX_Jalr),
+        .id_ex_ResultSrc(ID_EX_ResultSrc)
+    );
+    // 寄存器堆实例
+    reg_file regfile_inst(
+        .clk(clk),
+        .reset(reset),
+        .read1_idx(ID_rs1_idx),
+        .read2_idx(ID_rs2_idx),
+        .read1_data(RF_read1_data),
+        .read2_data(RF_read2_data),
+        .write_idx(RF_write_addr),
+        .write_data(RF_write_data),
+        .write_en(RF_write_en)
+    );
+    // EX阶段模块
+    ex_stage ex_stage_inst(
+        .clk(clk),
+        .reset(reset),
+        .ForwardAE(ForwardAE),
+        .ForwardBE(ForwardBE),
+        .id_ex_pc(ID_EX_pc),
+        .id_ex_rs1_val(ID_EX_rs1_val),
+        .id_ex_rs2_val(ID_EX_rs2_val),
+        .id_ex_rs1_idx(ID_EX_rs1_idx),
+        .id_ex_rs2_idx(ID_EX_rs2_idx),
+        .id_ex_rd_idx(ID_EX_rd_idx),
+        .id_ex_imm(ID_EX_imm),
+        .id_ex_RegWrite(ID_EX_RegWrite),
+        .id_ex_MemRead(ID_EX_MemRead),
+        .id_ex_MemWrite(ID_EX_MemWrite),
+        .id_ex_ALUOp(ID_EX_ALUOp),
+        .id_ex_ALUSrc(ID_EX_ALUSrc),
+        .id_ex_Branch(ID_EX_Branch),
+        .id_ex_Jal(ID_EX_Jal),
+        .id_ex_Jalr(ID_EX_Jalr),
+        .id_ex_ResultSrc(ID_EX_ResultSrc),
+        .ex_mem_alu_result_in(EX_MEM_alu_result),
+        .wb_data_in(WB_write_data),
+        .PCSrc(EX_PCSrc),
+        .PC_branch(EX_PC_branch),
+        .ex_mem_alu_result(EX_MEM_alu_result),
+        .ex_mem_store_val(EX_MEM_store_val),
+        .ex_mem_rd(EX_MEM_rd),
+        .ex_mem_RegWrite(EX_MEM_RegWrite),
+        .ex_mem_MemRead(EX_MEM_MemRead),
+        .ex_mem_MemWrite(EX_MEM_MemWrite),
+        .ex_mem_ResultSrc(EX_MEM_ResultSrc),
+        .ex_mem_link_val(EX_MEM_link_val)
+    );
+    // MEM阶段模块
+    mem_stage mem_stage_inst(
+        .clk(clk),
+        .reset(reset),
+        .ex_mem_alu_result(EX_MEM_alu_result),
+        .ex_mem_store_val(EX_MEM_store_val),
+        .ex_mem_rd(EX_MEM_rd),
+        .ex_mem_RegWrite(EX_MEM_RegWrite),
+        .ex_mem_MemRead(EX_MEM_MemRead),
+        .ex_mem_MemWrite(EX_MEM_MemWrite),
+        .ex_mem_ResultSrc(EX_MEM_ResultSrc),
+        .ex_mem_link_val(EX_MEM_link_val),
+        .mem_wb_rd(MEM_WB_rd),
+        .mem_wb_RegWrite(MEM_WB_RegWrite),
+        .mem_wb_ResultSrc(MEM_WB_ResultSrc),
+        .mem_wb_alu_result(MEM_WB_alu_result),
+        .mem_wb_mem_data(MEM_WB_mem_data),
+        .mem_wb_link_val(MEM_WB_link_val)
+    );
+    // WB阶段模块
+    wb_stage wb_stage_inst(
+        .mem_wb_rd(MEM_WB_rd),
+        .mem_wb_RegWrite(MEM_WB_RegWrite),
+        .mem_wb_ResultSrc(MEM_WB_ResultSrc),
+        .mem_wb_alu_result(MEM_WB_alu_result),
+        .mem_wb_mem_data(MEM_WB_mem_data),
+        .mem_wb_link_val(MEM_WB_link_val),
+        .rf_write_en(RF_write_en),
+        .rf_write_addr(RF_write_addr),
+        .rf_write_data(RF_write_data),
+        .wb_write_data(WB_write_data)
+    );
+endmodule
+module hazard_unit(
+    input wire PCSrcE,             // EX阶段确定发生跳转时的信号
+    input wire RegWriteM,          // MEM阶段指令会写寄存器
+    input wire RegWriteW,          // WB阶段指令会写寄存器
+    input wire [4:0] Rs1D,
+    input wire [4:0] Rs2D,         // ID阶段指令的源寄存器号
+    input wire [4:0] Rs1E,
+    input wire [4:0] Rs2E,         // EX阶段指令的源寄存器号
+    input wire [4:0] RdE,          // EX阶段指令的目标寄存器号
+    input wire [4:0] RdM,          // MEM阶段指令的目标寄存器号
+    input wire [4:0] RdW,          // WB阶段指令的目标寄存器号
+    input wire MemReadE,           // EX阶段指令是否为Load（从存储器读数据）
+    output reg StallF,             // IF阶段暂停信号
+    output reg StallD,             // ID阶段暂停信号
+    output reg FlushD,             // ID阶段冲刷信号
+    output reg FlushE,             // EX阶段冲刷信号
+    output reg [1:0] ForwardAE,    // 转发选择控制（ALU操作数A）
+    output reg [1:0] ForwardBE     // 转发选择控制（ALU操作数B）
+);
+    always @(*) begin
+        // 默认无暂停、无冲刷、无转发
+        StallF = 0; StallD = 0; FlushD = 0; FlushE = 0;
+        ForwardAE = 2'b00; ForwardBE = 2'b00;
+        // 数据前递控制：EX阶段源操作数与上一条或上两条指令目标相同时进行转发
+        if (RegWriteM && (RdM != 5'b0) && (RdM == Rs1E))
+            ForwardAE = 2'b10;
+        else if (RegWriteW && (RdW != 5'b0) && (RdW == Rs1E))
+            ForwardAE = 2'b01;
+        if (RegWriteM && (RdM != 5'b0) && (RdM == Rs2E))
+            ForwardBE = 2'b10;
+        else if (RegWriteW && (RdW != 5'b0) && (RdW == Rs2E))
+            ForwardBE = 2'b01;
+        // Load-Use数据冒险检测：如果EX阶段的指令为Load且其目标寄存器将被当前ID阶段指令使用，则暂停流水线一个周期
+        if (MemReadE && ((RdE == Rs1D) || (RdE == Rs2D)) && (RdE != 5'b0)) begin
+            StallF = 1;
+            StallD = 1;
+            FlushE = 1;  // 向EX阶段插入气泡
+        end
+        // 控制冒险处理：当EX阶段确定发生跳转/分支时，冲刷掉已取出的下一条指令
+        if (PCSrcE) begin
+            FlushD = 1;
+        end
+    end
+endmodule
+module instr_mem(
+    input wire [31:0] addr,
+    output wire [31:0] instr
+);
+    // 1KB指令存储（256条指令），Little Endian按字编址
+    reg [31:0] memory [0:255];
+    initial begin
+        memory[0]  = 32'h000012B7; // 0x000: LUI x5, 0x00001
+        memory[1]  = 32'h23428293; // 0x004: ADDI x5, x5, 0x234
+        memory[2]  = 32'h0052E333; // 0x008: OR   x6, x5, x5
+        memory[3]  = 32'h00A00393; // 0x00C: ADDI x7, x0, 10
+        memory[4]  = 32'h00728433; // 0x010: ADD  x8, x5, x7
+        memory[5]  = 32'h407404B3; // 0x014: SUB  x9, x8, x7
+        memory[6]  = 32'h40000193; // 0x018: ADDI x3, x0, 0x400
+        memory[7]  = 32'h0091A023; // 0x01C: SW   x9, 0(x3)
+        memory[8]  = 32'h0001A503; // 0x020: LW   x10, 0(x3)
+        memory[9]  = 32'h00500593; // 0x024: ADDI x11, x0, 5
+        memory[10] = 32'h00500613; // 0x028: ADDI x12, x0, 5
+        memory[11] = 32'h00C58463; // 0x02C: BEQ  x11, x12, label
+        memory[12] = 32'h00100693; // 0x030: ADDI x13, x0, 1       # (to be skipped)
+        memory[13] = 32'h000066B3; // 0x034: OR   x13, x0, x0      # label: x13=0
+        memory[14] = 32'h010000EF; // 0x038: JAL  x1, subroutine
+        memory[15] = 32'h00200713; // 0x03C: ADDI x14, x0, 2      # after return
+        memory[16] = 32'h00000063; // 0x040: BEQ  x0, x0, loop    # loop: halt
+        memory[17] = 32'h00000033; // 0x044: ADD  x0, x0, x0      # NOP
+        memory[18] = 32'h06300793; // 0x048: ADDI x15, x0, 99     # subroutine
+        memory[19] = 32'h00008067; // 0x04C: JALR x0, x1, 0       # return
+    end
+    // 按字寻址取指（addr[1:0]恒为0），addr[9:2]作为ROM索引
+    assign instr = memory[addr[9:2]];
+endmodule
+module if_stage(
+    input wire clk,
+    input wire reset,
+    input wire StallF,
+    input wire PCSrc,
+    input wire [31:0] PC_branch,
+    output wire [31:0] PC_out,
+    output wire [31:0] PC_plus4
+);
+    reg [31:0] PC_reg;
+    wire [31:0] PC_next;
+    // 下一地址选择：跳转优先，其次正常+4，暂停则PC保持
+    assign PC_next = PCSrc ? PC_branch :
+                     (StallF ? PC_reg : (PC_reg + 32'd4));
+    always @(posedge clk or posedge reset) begin
+        if(reset) begin
+            PC_reg <= 32'h00000000;
+        end else begin
+            PC_reg <= PC_next;
+        end
+    end
+    assign PC_out = PC_reg;
+    assign PC_plus4 = PC_reg + 32'd4;
+endmodule
+module id_stage(
+    input wire clk,
+    input wire reset,
+    input wire StallD,
+    input wire FlushD,
+    input wire FlushE,
+    input wire [31:0] instruction_in,
+    input wire [31:0] PC_in,
+    input wire [31:0] reg1_data_in,
+    input wire [31:0] reg2_data_in,
+    output wire [4:0] rs1_idx_out,
+    output wire [4:0] rs2_idx_out,
+    // 输出给EX阶段的ID/EX流水寄存器信号
+    output reg [31:0] id_ex_pc,
+    output reg [31:0] id_ex_rs1_val,
+    output reg [31:0] id_ex_rs2_val,
+    output reg [4:0] id_ex_rs1_idx,
+    output reg [4:0] id_ex_rs2_idx,
+    output reg [4:0] id_ex_rd_idx,
+    output reg [31:0] id_ex_imm,
+    output reg id_ex_RegWrite,
+    output reg id_ex_MemRead,
+    output reg id_ex_MemWrite,
+    output reg [1:0] id_ex_ALUOp,
+    output reg id_ex_ALUSrc,
+    output reg id_ex_Branch,
+    output reg id_ex_Jal,
+    output reg id_ex_Jalr,
+    output reg [1:0] id_ex_ResultSrc
+);
+    // IF/ID流水寄存器
+    reg [31:0] if_id_instr;
+    reg [31:0] if_id_pc;
+    // 实例化控制单元进行指令译码
+    wire ctrl_RegWrite, ctrl_MemRead, ctrl_MemWrite;
+    wire [1:0] ctrl_ALUOp;
+    wire ctrl_ALUSrc, ctrl_Branch, ctrl_Jal, ctrl_Jalr;
+    wire [1:0] ctrl_ResultSrc;
+    control_unit CU(
+        .instr(if_id_instr),
+        .RegWrite(ctrl_RegWrite),
+        .MemRead(ctrl_MemRead),
+        .MemWrite(ctrl_MemWrite),
+        .ALUOp(ctrl_ALUOp),
+        .ALUSrc(ctrl_ALUSrc),
+        .Branch(ctrl_Branch),
+        .Jal(ctrl_Jal),
+        .Jalr(ctrl_Jalr),
+        .ResultSrc(ctrl_ResultSrc)
+    );
+    // 生成立即数（根据指令类型拼接sign extension）
+    reg [31:0] imm;
+    wire [6:0] opcode = if_id_instr[6:0];
+    always @(*) begin
+        case(opcode)
+            7'b0010011,    // I-type (ADDI 等)
+            7'b0000011,    // I-type (LW)
+            7'b1100111:    // I-type (JALR)
+                imm = {{20{if_id_instr[31]}}, if_id_instr[31:20]};
+            7'b0100011:    // S-type (SW)
+                imm = {{20{if_id_instr[31]}}, if_id_instr[31:25], if_id_instr[11:7]};
+            7'b1100011:    // B-type (BEQ)
+                imm = {{19{if_id_instr[31]}}, if_id_instr[31], if_id_instr[7],
+                       if_id_instr[30:25], if_id_instr[11:8], 1'b0};
+            7'b0110111:    // U-type (LUI)
+                imm = {if_id_instr[31:12], 12'b0};
+            7'b1101111:    // J-type (JAL)
+                imm = {{11{if_id_instr[31]}}, if_id_instr[31], if_id_instr[19:12],
+                       if_id_instr[20], if_id_instr[30:21], 1'b0};
+            default:
+                imm = 32'b0;
+        endcase
+    end
+    // 确定当前指令源寄存器索引（无用操作数设为x0=寄存器0）
+    wire use_rs1 = (opcode != 7'b1101111) && (opcode != 7'b0110111);  // 非JAL和非LUI指令需要rs1
+    wire use_rs2 = (opcode == 7'b0110011) || (opcode == 7'b0100011) || (opcode == 7'b1100011);
+    assign rs1_idx_out = use_rs1 ? if_id_instr[19:15] : 5'b00000;
+    assign rs2_idx_out = use_rs2 ? if_id_instr[24:20] : 5'b00000;
+    // 时钟上升沿更新流水寄存器
+    always @(posedge clk or posedge reset) begin
+        if(reset) begin
+            // 初始化IF/ID和ID/EX寄存器为NOP
+            if_id_instr <= 32'h00000013;  // NOP (addi x0,x0,0)
+            if_id_pc <= 32'b0;
+            id_ex_pc <= 32'b0;
+            id_ex_rs1_val <= 32'b0;
+            id_ex_rs2_val <= 32'b0;
+            id_ex_rs1_idx <= 5'b0;
+            id_ex_rs2_idx <= 5'b0;
+            id_ex_rd_idx <= 5'b0;
+            id_ex_imm <= 32'b0;
+            id_ex_RegWrite <= 0;
+            id_ex_MemRead <= 0;
+            id_ex_MemWrite <= 0;
+            id_ex_ALUOp <= 2'b00;
+            id_ex_ALUSrc <= 0;
+            id_ex_Branch <= 0;
+            id_ex_Jal <= 0;
+            id_ex_Jalr <= 0;
+            id_ex_ResultSrc <= 2'b00;
+        end else begin
+            // 更新IF/ID流水寄存器
+            if(StallD) begin
+                // 数据冒险暂停时，不更新IF/ID（保持上一周期指令）
+            end else if(FlushD) begin
+                // 控制冒险冲刷，插入NOP到译码级
+                if_id_instr <= 32'h00000013;
+                if_id_pc <= 32'b0;
+            end else begin
+                // 正常推进取指寄存器值
+                if_id_instr <= instruction_in;
+                if_id_pc <= PC_in;
+            end
+            // 更新ID/EX流水寄存器
+            if(FlushE) begin
+                // Load-Use气泡冲刷EX级
+                id_ex_pc <= 32'b0;
+                id_ex_rs1_val <= 32'b0;
+                id_ex_rs2_val <= 32'b0;
+                id_ex_rs1_idx <= 5'b0;
+                id_ex_rs2_idx <= 5'b0;
+                id_ex_rd_idx <= 5'b0;
+                id_ex_imm <= 32'b0;
+                id_ex_RegWrite <= 0;
+                id_ex_MemRead <= 0;
+                id_ex_MemWrite <= 0;
+                id_ex_ALUOp <= 2'b00;
+                id_ex_ALUSrc <= 0;
+                id_ex_Branch <= 0;
+                id_ex_Jal <= 0;
+                id_ex_Jalr <= 0;
+                id_ex_ResultSrc <= 2'b00;
+            end else if(!StallD) begin
+                // 将当前解码得到的信息送入EX阶段寄存器
+                id_ex_pc <= if_id_pc;
+                id_ex_rs1_val <= reg1_data_in;
+                id_ex_rs2_val <= reg2_data_in;
+                id_ex_rs1_idx <= rs1_idx_out;
+                id_ex_rs2_idx <= rs2_idx_out;
+                id_ex_rd_idx <= if_id_instr[11:7];
+                id_ex_imm <= imm;
+                id_ex_RegWrite <= ctrl_RegWrite;
+                id_ex_MemRead <= ctrl_MemRead;
+                id_ex_MemWrite <= ctrl_MemWrite;
+                id_ex_ALUOp <= ctrl_ALUOp;
+                id_ex_ALUSrc <= ctrl_ALUSrc;
+                id_ex_Branch <= ctrl_Branch;
+                id_ex_Jal <= ctrl_Jal;
+                id_ex_Jalr <= ctrl_Jalr;
+                id_ex_ResultSrc <= ctrl_ResultSrc;
+            end
+        end
+    end
+endmodule
+module control_unit(
+    input wire [31:0] instr,
+    output reg RegWrite,
+    output reg MemRead,
+    output reg MemWrite,
+    output reg [1:0] ALUOp,
+    output reg ALUSrc,
+    output reg Branch,
+    output reg Jal,
+    output reg Jalr,
+    output reg [1:0] ResultSrc
+);
+    wire [6:0] opcode = instr[6:0];
+    wire [2:0] funct3 = instr[14:12];
+    wire [6:0] funct7 = instr[31:25];
+    always @(*) begin
+        // 默认输出信号值
+        RegWrite = 0; MemRead = 0; MemWrite = 0;
+        ALUOp = 2'b00; ALUSrc = 0;
+        Branch = 0; Jal = 0; Jalr = 0;
+        ResultSrc = 2'b00;
+        case(opcode)
+            7'b0110011: begin  // R类型: add/sub/or
+                RegWrite = 1;
+                ALUSrc = 0;
+                ResultSrc = 2'b00;
+                if (funct3 == 3'b000) begin        // funct3=000: add或sub
+                    if (funct7 == 7'b0100000)      // funct7=0x20: sub
+                        ALUOp = 2'b01;
+                    else                            // 其他: add
+                        ALUOp = 2'b00;
+                end else if (funct3 == 3'b110) begin // funct3=110: or
+                    ALUOp = 2'b10;
+                end else begin
+                    ALUOp = 2'b00;
+                end
+            end
+            7'b0010011: begin  // I类型: ADDI 等（本设计仅需ADDI）
+                if (funct3 == 3'b000) begin        // addi
+                    RegWrite = 1;
+                    ALUSrc = 1;
+                    ALUOp = 2'b00;
+                    ResultSrc = 2'b00;
+                end
+            end
+            7'b0000011: begin  // I类型: LOAD（LW）
+                if (funct3 == 3'b010) begin        // lw
+                    RegWrite = 1;
+                    MemRead = 1;
+                    ALUSrc = 1;
+                    ALUOp = 2'b00;
+                    ResultSrc = 2'b01;            // 来源于存储器
+                end
+            end
+            7'b0100011: begin  // S类型: STORE（SW）
+                if (funct3 == 3'b010) begin        // sw
+                    RegWrite = 0;
+                    MemWrite = 1;
+                    ALUSrc = 1;
+                    ALUOp = 2'b00;
+                end
+            end
+            7'b1100011: begin  // B类型: BEQ
+                if (funct3 == 3'b000) begin        // beq
+                    RegWrite = 0;
+                    Branch = 1;
+                    ALUSrc = 0;
+                    ALUOp = 2'b01;                // 设为减法，用于比较是否相等
+                end
+            end
+            7'b0110111: begin  // U类型: LUI
+                RegWrite = 1;
+                ALUSrc = 1;
+                ALUOp = 2'b00;
+                ResultSrc = 2'b00;
+            end
+            7'b1101111: begin  // J类型: JAL
+                RegWrite = 1;
+                Jal = 1;
+                ALUSrc = 1;
+                ALUOp = 2'b00;
+                ResultSrc = 2'b10;                // 将PC+4写入rd
+            end
+            7'b1100111: begin  // I类型: JALR
+                if (funct3 == 3'b000) begin        // jalr
+                    RegWrite = 1;
+                    Jalr = 1;
+                    ALUSrc = 1;
+                    ALUOp = 2'b00;
+                    ResultSrc = 2'b10;            // 将PC+4写入rd
+                end
+            end
+        endcase
+    end
+endmodule
+module reg_file(
+    input wire clk,
+    input wire reset,
+    input wire [4:0] read1_idx,
+    input wire [4:0] read2_idx,
+    output wire [31:0] read1_data,
+    output wire [31:0] read2_data,
+    input wire [4:0] write_idx,
+    input wire [31:0] write_data,
+    input wire write_en
+);
+    reg [31:0] regs [0:31];
+    integer i;
+    always @(posedge clk) begin
+        if(reset) begin
+            for(i=0; i<32; i=i+1)
+                regs[i] <= 32'b0;
+        end else if(write_en && (write_idx != 5'b0)) begin
+            regs[write_idx] <= write_data;  // 忽略对x0寄存器的写入
+        end
+    end
+    assign read1_data = regs[read1_idx];
+    assign read2_data = regs[read2_idx];
+endmodule
+module ex_stage(
+    input wire clk,
+    input wire reset,
+    // 来自冒险单元的转发控制
+    input wire [1:0] ForwardAE,
+    input wire [1:0] ForwardBE,
+    // 来自ID/EX寄存器的数据和控制信号
+    input wire [31:0] id_ex_pc,
+    input wire [31:0] id_ex_rs1_val,
+    input wire [31:0] id_ex_rs2_val,
+    input wire [4:0] id_ex_rs1_idx,
+    input wire [4:0] id_ex_rs2_idx,
+    input wire [4:0] id_ex_rd_idx,
+    input wire [31:0] id_ex_imm,
+    input wire id_ex_RegWrite,
+    input wire id_ex_MemRead,
+    input wire id_ex_MemWrite,
+    input wire [1:0] id_ex_ALUOp,
+    input wire id_ex_ALUSrc,
+    input wire id_ex_Branch,
+    input wire id_ex_Jal,
+    input wire id_ex_Jalr,
+    input wire [1:0] id_ex_ResultSrc,
+    // 来自后续阶段用于数据前递的数据
+    input wire [31:0] ex_mem_alu_result_in,  // 来自MEM阶段的运算结果（用于前递）
+    input wire [31:0] wb_data_in,           // 来自WB阶段写回的数据（用于前递）
+    // 输出到IF阶段的跳转信号
+    output wire PCSrc,
+    output wire [31:0] PC_branch,
+    // EX/MEM阶段流水寄存器输出
+    output reg [31:0] ex_mem_alu_result,
+    output reg [31:0] ex_mem_store_val,
+    output reg [4:0] ex_mem_rd,
+    output reg ex_mem_RegWrite,
+    output reg ex_mem_MemRead,
+    output reg ex_mem_MemWrite,
+    output reg [1:0] ex_mem_ResultSrc,
+    output reg [31:0] ex_mem_link_val
+);
+    // 根据前递控制选择ALU操作数的最终值
+    wire [31:0] forwardA_val = (ForwardAE == 2'b10) ? ex_mem_alu_result_in :
+                               (ForwardAE == 2'b01) ? wb_data_in :
+                                                       id_ex_rs1_val;
+    wire [31:0] forwardB_val = (ForwardBE == 2'b10) ? ex_mem_alu_result_in :
+                               (ForwardBE == 2'b01) ? wb_data_in :
+                                                       id_ex_rs2_val;
+    // 确定送入ALU的操作数A和B（ALUSrc=1则B用立即数）
+    wire [31:0] alu_in_A = forwardA_val;
+    wire [31:0] alu_in_B = id_ex_ALUSrc ? id_ex_imm : forwardB_val;
+    // 实例化ALU执行运算
+    wire [31:0] alu_out;
+    alu ALU_unit(
+        .A(alu_in_A),
+        .B(alu_in_B),
+        .ALUOp(id_ex_ALUOp),
+        .result(alu_out)
+    );
+    // 分支/跳转判断逻辑
+    wire branch_taken = (id_ex_Branch && (alu_out == 32'b0));  // BEQ若减法结果为0则跳转
+    wire pcsrc_int = branch_taken || id_ex_Jal || id_ex_Jalr;
+    // 计算跳转目标地址
+    wire [31:0] branch_addr = id_ex_pc + id_ex_imm;
+//    wire [31:0] jalr_addr = { (alu_in_A + id_ex_imm)[31:1], 1'b0 };  // JALR目标 = rs1 + imm （对齐）
+//    assign PC_branch = id_ex_Jalr ? jalr_addr : branch_addr;
+    // 计算JALR目标地址时，先存储加法结果再进行位拼接
+    wire [31:0] jalr_sum = alu_in_A + id_ex_imm;  // 新增临时变量存储rs1+imm的结果
+    wire [31:0] jalr_addr = { jalr_sum[31:1], 1'b0 };  // 使用临时变量进行位拼接，确保地址对齐
+
+    assign PC_branch = id_ex_Jalr ? jalr_addr : branch_addr;
+    assign PCSrc = pcsrc_int;
+    // 计算返回地址PC+4（link值）
+    wire [31:0] link_val = id_ex_pc + 32'd4;
+    // 确定需要写回的ALU输出值（若为JAL/JALR，则实际写回PC+4作为"ALU结果"用于前递）
+    wire [31:0] actual_alu_result = (id_ex_ResultSrc == 2'b10) ? link_val : alu_out;
+    // 时钟上升沿更新EX/MEM流水寄存器
+    always @(posedge clk or posedge reset) begin
+        if(reset) begin
+            ex_mem_alu_result <= 32'b0;
+            ex_mem_store_val <= 32'b0;
+            ex_mem_rd <= 5'b0;
+            ex_mem_RegWrite <= 0;
+            ex_mem_MemRead <= 0;
+            ex_mem_MemWrite <= 0;
+            ex_mem_ResultSrc <= 2'b00;
+            ex_mem_link_val <= 32'b0;
+        end else begin
+            ex_mem_alu_result <= actual_alu_result;
+            ex_mem_store_val <= forwardB_val;
+            ex_mem_rd <= id_ex_rd_idx;
+            ex_mem_RegWrite <= id_ex_RegWrite;
+            ex_mem_MemRead <= id_ex_MemRead;
+            ex_mem_MemWrite <= id_ex_MemWrite;
+            ex_mem_ResultSrc <= id_ex_ResultSrc;
+            ex_mem_link_val <= link_val;
+        end
+    end
+endmodule
+module alu(
+    input wire [31:0] A,
+    input wire [31:0] B,
+    input wire [1:0] ALUOp,
+    output reg [31:0] result
+);
+    always @(*) begin
+        case(ALUOp)
+            2'b00: result = A + B;
+            2'b01: result = A - B;
+            2'b10: result = A | B;
+            default: result = A + B;
+        endcase
+    end
+endmodule
+module mem_stage(
+    input wire clk,
+    input wire reset,
+    // 来自EX/MEM寄存器的信号
+    input wire [31:0] ex_mem_alu_result,
+    input wire [31:0] ex_mem_store_val,
+    input wire [4:0] ex_mem_rd,
+    input wire ex_mem_RegWrite,
+    input wire ex_mem_MemRead,
+    input wire ex_mem_MemWrite,
+    input wire [1:0] ex_mem_ResultSrc,
+    input wire [31:0] ex_mem_link_val,
+    // 输出至MEM/WB寄存器的信号
+    output reg [4:0] mem_wb_rd,
+    output reg mem_wb_RegWrite,
+    output reg [1:0] mem_wb_ResultSrc,
+    output reg [31:0] mem_wb_alu_result,
+    output reg [31:0] mem_wb_mem_data,
+    output reg [31:0] mem_wb_link_val
+);
+    // 数据存储器实例
+    wire [31:0] mem_data_out;
+    data_mem dmem(
+        .clk(clk),
+        .reset(reset),
+        .MemRead(ex_mem_MemRead),
+        .MemWrite(ex_mem_MemWrite),
+        .addr(ex_mem_alu_result),
+        .write_data(ex_mem_store_val),
+        .read_data(mem_data_out)
+    );
+    // 时钟上升沿更新MEM/WB流水寄存器
+    always @(posedge clk or posedge reset) begin
+        if(reset) begin
+            mem_wb_rd <= 5'b0;
+            mem_wb_RegWrite <= 0;
+            mem_wb_ResultSrc <= 2'b00;
+            mem_wb_alu_result <= 32'b0;
+            mem_wb_mem_data <= 32'b0;
+            mem_wb_link_val <= 32'b0;
+        end else begin
+            mem_wb_rd <= ex_mem_rd;
+            mem_wb_RegWrite <= ex_mem_RegWrite;
+            mem_wb_ResultSrc <= ex_mem_ResultSrc;
+            mem_wb_alu_result <= ex_mem_alu_result;
+            mem_wb_mem_data <= mem_data_out;
+            mem_wb_link_val <= ex_mem_link_val;
+        end
+    end
+endmodule
+module data_mem(
+    input wire clk,
+    input wire reset,
+    input wire MemRead,
+    input wire MemWrite,
+    input wire [31:0] addr,
+    input wire [31:0] write_data,
+    output wire [31:0] read_data
+);
+    // 1KB数据存储（256×32-bit），地址0x400-0x7FF
+    reg [31:0] memory [0:255];
+    integer j;
+    initial begin
+        for(j=0; j<256; j=j+1)
+            memory[j] = 32'b0;
+    end
+    wire [31:0] offset = addr - 32'h400;
+    wire [7:0] index = offset[9:2];
+    assign read_data = MemRead ? memory[index] : 32'b0;
+    always @(posedge clk) begin
+        if(reset) begin
+            for(j=0; j<256; j=j+1)
+                memory[j] <= 32'b0;
+        end else if(MemWrite) begin
+            memory[index] <= write_data;
+        end
+    end
+endmodule
+module wb_stage(
+    // 来自MEM/WB寄存器的信号
+    input wire [4:0] mem_wb_rd,
+    input wire mem_wb_RegWrite,
+    input wire [1:0] mem_wb_ResultSrc,
+    input wire [31:0] mem_wb_alu_result,
+    input wire [31:0] mem_wb_mem_data,
+    input wire [31:0] mem_wb_link_val,
+    // 输出至寄存器堆写端口的信号
+    output wire rf_write_en,
+    output wire [4:0] rf_write_addr,
+    output wire [31:0] rf_write_data,
+    // 输出提供给转发单元的写回数据（与rf_write_data相同）
+    output wire [31:0] wb_write_data
+);
+    assign rf_write_en = mem_wb_RegWrite;
+    assign rf_write_addr = mem_wb_rd;
+    // 根据ResultSrc选择写回的数据
+    assign rf_write_data = (mem_wb_ResultSrc == 2'b01) ? mem_wb_mem_data :
+                           (mem_wb_ResultSrc == 2'b10) ? mem_wb_link_val :
+                                                         mem_wb_alu_result;
+    assign wb_write_data = rf_write_data;
+endmodule
